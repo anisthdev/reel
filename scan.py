@@ -12,7 +12,7 @@ Rows come from ~/.config/reel/library.toml (see there), each one either
                     (e.g. separate season folders) are merged
 
 Writes ~/.cache/reel/library.json plus BGRA thumbnails ready for
-mpv's overlay-add. Posters, details and episode stills come from TMDB when
+mpv's overlay-add, and the JPEGs they came from (poster, backdrop, still). Posters, details and episode stills come from TMDB when
 online (token in ~/.config/reel/tmdb_token or $TMDB_TOKEN); anything
 missing falls back to a frame grabbed from the video.
 """
@@ -322,28 +322,32 @@ def download(url, dest):
 
 
 def make_thumb(job):
-    """job: (key, size, tmdb_image_path or None, video path for fallback, seek fraction)"""
+    """job: (key, size, tmdb_image_path or None, video path for fallback, seek fraction)
+
+    Returns (key, BGRA thumbnail, source, image): the image is the JPEG it was
+    made from, for front ends that draw images themselves (quickbar).
+    """
     key, size, image_path, video, fraction = job
     if image_path:
         dest = thumb_path(key, size, "tmdb")
-        if dest.exists():
-            return key, str(dest), "tmdb"
         width = {POSTER_SIZE: "w342", CARD_SIZE: "w780"}.get(size, "w300")
         original = IMAGES / (width + image_path.replace("/", "_"))
-        if download(f"{TMDB_IMAGE}/{width}{image_path}", original) and to_bgra(original, dest, size):
-            return key, str(dest), "tmdb"
+        if dest.exists() and original.exists():
+            return key, str(dest), "tmdb", str(original)
+        if download(f"{TMDB_IMAGE}/{width}{image_path}", original) and (dest.exists() or to_bgra(original, dest, size)):
+            return key, str(dest), "tmdb", str(original)
     if video:
         dest = thumb_path(key, size, "frame")
-        if dest.exists():
-            return key, str(dest), "frame"
         frame = IMAGES / (dest.stem + ".jpg")
+        if dest.exists() and frame.exists():
+            return key, str(dest), "frame", str(frame)
         result = subprocess.run(
             ["ffmpegthumbnailer", "-i", str(video), "-o", str(frame), "-s", str(max(size) * 2), "-t", f"{int(fraction * 100)}%", "-q", "8"],
             capture_output=True,
         )
         if result.returncode == 0 and frame.exists() and to_bgra(frame, dest, size):
-            return key, str(dest), "frame"
-    return key, None, "missing"
+            return key, str(dest), "frame", str(frame)
+    return key, None, "missing", None
 
 
 # --- library ----------------------------------------------------------------
@@ -526,16 +530,21 @@ def main():
     save_guess_cache()
 
     log(f"Making {len(jobs)} thumbnails")
-    thumbs, sources = {}, {}
+    thumbs, images, sources = {}, {}, {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        for key, path, source in pool.map(make_thumb, jobs):
+        for key, path, source, image in pool.map(make_thumb, jobs):
             thumbs[key] = path
+            images[key] = image
             sources[source] = sources.get(source, 0) + 1
+    # thumb, card: mpv's BGRA; poster, backdrop, still: the JPEGs behind them
     for item in items:
         item["thumb"] = thumbs.get(item["id"])
         item["card"] = thumbs.get(item["id"] + "#card")
+        item["poster"] = images.get(item["id"])
+        item["backdrop"] = images.get(item["id"] + "#card")
         for ep in item.get("episodes", []):
             ep["thumb"] = thumbs.get(ep["id"])
+            ep["still"] = images.get(ep["id"])
 
     library = {
         "rows": [row["name"] for row in rows],
