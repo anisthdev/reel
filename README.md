@@ -13,6 +13,10 @@ posters and details from TMDB, and finished torrents sorted into it.
   and Open folder; anything it isn't sure of stays put, with a notification
   saying why.
 
+Each movie, episode and series records when it was `added` (a file's
+mtime or ctime, whichever is later; a series' latest episode), for
+quickbar's video menu to sort by.
+
 Both are `uv run --script` scripts (guessit is their one dependency).
 
 ## Configuration

@@ -252,6 +252,13 @@ def watch_later_name(path):
     return hashlib.md5(str(path).encode()).hexdigest().upper()
 
 
+def added(path):
+    """When a file came into the library: moving it in (as sort.py does)
+    changes its ctime, downloading it its mtime."""
+    stat = path.stat()
+    return int(max(stat.st_mtime, stat.st_ctime))
+
+
 def load_probe_cache():
     try:
         return json.loads(PROBE_CACHE.read_text())
@@ -424,6 +431,7 @@ def scan_movies(row, tmdb, overrides, probes, jobs):
             "height": info.get("height"),
             "audio": info.get("audio", []),
             "subs": info.get("subs", []),
+            "added": added(video),
         }
         jobs.append((item["id"], POSTER_SIZE, (details or {}).get("poster_path"), video, 0.15))
         backdrop = tmdb.backdrop("movie", details["id"], details) if details else None
@@ -481,9 +489,10 @@ def scan_series(row, tmdb, overrides, probes, jobs):
                 "watch_later": watch_later_name(f),
                 "duration": info.get("duration"),
                 "width": info.get("width"),
-            "height": info.get("height"),
+                "height": info.get("height"),
                 "audio": info.get("audio", []),
                 "subs": info.get("subs", []),
+                "added": added(f),
             }
             jobs.append((ep["id"], STILL_SIZE, meta.get("still_path"), f, 0.3))
             episodes.append(ep)
@@ -501,6 +510,8 @@ def scan_series(row, tmdb, overrides, probes, jobs):
             "tmdb_id": (details or {}).get("id"),
             "folders": show["folders"],
             "episodes": episodes,
+            # When its latest episode came in
+            "added": max((e["added"] for e in episodes), default=0),
         }
         jobs.append((series_id, POSTER_SIZE, (details or {}).get("poster_path"), first_video, 0.3))
         backdrop = tmdb.backdrop("tv", details["id"], details) if details else None
