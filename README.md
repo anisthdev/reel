@@ -21,6 +21,29 @@ Both are `uv run --script` scripts (guessit is their one dependency).
 `makepkg -si` with the PKGBUILD installs them as `reel-scan` and
 `reel-sort`.
 
+## library.json
+
+What other programs read (mpv's start screen, quickbar's video menu):
+`$XDG_CACHE_HOME/reel/library.json`, rewritten only when something changed.
+
+```
+{"rows": ["Movies", "TV", …],             the rows, in order
+ "poster_size": [w, h], "card_size": [w, h], "still_size": [w, h],
+ "items": [ITEM, …]}
+
+ITEM     id, kind ("movie" | "series"), category (its row), title, year,
+         overview, tagline, rating, genres, tmdb_id, added (epoch),
+         thumb, card (BGRA files for mpv), poster, backdrop (JPEGs);
+         a movie: path, watch_later (mpv's resume file name), duration,
+         width, height, audio, subs (languages);
+         a series: folders, episodes: [EPISODE, …]
+EPISODE  id, season, episode, title, overview, air_date, path,
+         watch_later, duration, width, height, audio, subs, added,
+         thumb, still
+```
+
+Fields may be missing or null when nothing is known (offline, say).
+
 ## Configuration
 
 `~/.config/reel/` (in the dotfiles):
