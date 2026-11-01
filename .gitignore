@@ -1,1 +1,7 @@
 __pycache__/
+
+# makepkg
+/src/
+/pkg/
+/reel/
+*.pkg.tar.zst

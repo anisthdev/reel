@@ -18,6 +18,8 @@ mtime or ctime, whichever is later; a series' latest episode), for
 quickbar's video menu to sort by.
 
 Both are `uv run --script` scripts (guessit is their one dependency).
+`makepkg -si` with the PKGBUILD installs them as `reel-scan` and
+`reel-sort`.
 
 ## Configuration
 
@@ -37,10 +39,10 @@ Caches (TMDB responses, guesses, probes, images, `sort.log`) are in
 ## Use
 
 ```sh
-./scan.py                       # rescan
-./sort.py --id 12 --dry-run     # what would happen to torrent 12
-./sort.py --classify "NAME"     # classify a name only
+reel-scan                       # rescan
+reel-sort --id 12 --dry-run     # what would happen to torrent 12
+reel-sort --classify "NAME"     # classify a name only
 ```
 
-Transmission runs `sort.py` from `script-torrent-done-filename` in
-`~/.config/transmission-daemon/settings.json`.
+Transmission runs it as `script-torrent-done-filename: /usr/bin/reel-sort`
+in `~/.config/transmission-daemon/settings.json`.
