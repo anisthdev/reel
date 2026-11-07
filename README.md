@@ -33,7 +33,9 @@ What other programs read (mpv's start screen, quickbar's video menu):
 
 ITEM     id, kind ("movie" | "series"), category (its row), title, year,
          overview, tagline, rating, genres, tmdb_id, added (epoch),
-         thumb, card (BGRA files for mpv), poster, backdrop (JPEGs);
+         thumb, card (BGRA files for mpv), poster, backdrop (JPEGs),
+         logo (premultiplied BGRA for mpv), logo_size ([w, h], fits
+         500x200), logo_image (the transparent PNG);
          a movie: path, watch_later (mpv's resume file name), duration,
          width, height, audio, subs (languages);
          a series: folders, episodes: [EPISODE, …]

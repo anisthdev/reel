@@ -12,7 +12,8 @@ Rows come from ~/.config/reel/library.toml (see there), each one either
                     (e.g. separate season folders) are merged
 
 Writes ~/.cache/reel/library.json plus BGRA thumbnails ready for
-mpv's overlay-add, and the JPEGs they came from (poster, backdrop, still). Posters, details and episode stills come from TMDB when
+mpv's overlay-add, and the JPEGs they came from (poster, backdrop, still), plus
+each title's transparent logo. Posters, details and episode stills come from TMDB when
 online (token in ~/.config/reel/tmdb_token or $TMDB_TOKEN); anything
 missing falls back to a frame grabbed from the video.
 """
@@ -58,6 +59,8 @@ LIBRARY = CACHE / "library.json"
 POSTER_SIZE = (220, 330)
 CARD_SIZE = (400, 225)
 STILL_SIZE = (320, 180)
+# Logos keep their shape: scaled to fit this box, never up.
+LOGO_BOX = (500, 200)
 TMDB_API = "https://api.themoviedb.org/3"
 TMDB_IMAGE = "https://image.tmdb.org/t/p"
 TMDB_TTL = 30 * 24 * 3600
@@ -208,6 +211,18 @@ class Tmdb:
             return max(titled, key=lambda b: (b.get("vote_average") or 0, b.get("width") or 0))["file_path"]
         return (details or {}).get("backdrop_path")
 
+    def logo(self, kind, tmdb_id):
+        """The title's logo (transparent PNG): English, else language-free.
+        Same images request as backdrop(), so it's already cached."""
+        images = self.get(f"/{kind}/{tmdb_id}/images", include_image_language="en,null") or {}
+        logos = [l for l in images.get("logos") or [] if (l.get("file_path") or "").endswith(".png")]
+        for language in ("en", None):
+            choices = [l for l in logos if l.get("iso_639_1") == language]
+            if choices:
+                best = max(choices, key=lambda l: (l.get("vote_average") or 0, l.get("width") or 0))
+                return best["file_path"]
+        return None
+
     def search(self, kind, title, year=None):
         params = {"query": title, "include_adult": "false"}
         if year:
@@ -357,6 +372,42 @@ def make_thumb(job):
     return key, None, "missing", None
 
 
+def make_logo(job):
+    """job: (key, TMDB logo path). Returns (key, BGRA file, [w, h], PNG).
+
+    Unlike thumbnails, logos keep their own aspect ratio and transparency,
+    so the BGRA is premultiplied (as overlay-add wants) and its size varies.
+    """
+    key, image_path = job
+    original = IMAGES / ("w500" + image_path.replace("/", "_"))
+    if not download(f"{TMDB_IMAGE}/w500{image_path}", original):
+        return key, None, None, None
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(original)],
+        capture_output=True, text=True,
+    )
+    try:
+        width, height = (int(v) for v in out.stdout.strip().split(",")[:2])
+    except ValueError:
+        return key, None, None, None
+    scale = min(LOGO_BOX[0] / width, LOGO_BOX[1] / height, 1)
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    dest = THUMBS / f"{hashlib.sha1(image_path.encode()).hexdigest()[:16]}_logo_{w}x{h}.bgra"
+    if not dest.exists():
+        tmp = dest.with_suffix(".tmp")
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", str(original),
+             "-vf", f"scale={w}:{h}:flags=lanczos,format=rgba,premultiply=inplace=1,format=bgra",
+             "-frames:v", "1", "-f", "rawvideo", str(tmp)],
+            capture_output=True,
+        )
+        if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size != w * h * 4:
+            tmp.unlink(missing_ok=True)
+            return key, None, None, None
+        tmp.replace(dest)
+    return key, str(dest), [w, h], str(original)
+
+
 # --- library ----------------------------------------------------------------
 
 
@@ -395,7 +446,7 @@ def load_overrides():
         return {}
 
 
-def scan_movies(row, tmdb, overrides, probes, jobs):
+def scan_movies(row, tmdb, overrides, probes, jobs, logo_jobs):
     items = []
     for entry in row_entries(row):
         files = video_files(entry)
@@ -436,11 +487,14 @@ def scan_movies(row, tmdb, overrides, probes, jobs):
         jobs.append((item["id"], POSTER_SIZE, (details or {}).get("poster_path"), video, 0.15))
         backdrop = tmdb.backdrop("movie", details["id"], details) if details else None
         jobs.append((item["id"] + "#card", CARD_SIZE, backdrop, video, 0.15))
+        logo = tmdb.logo("movie", details["id"]) if details else None
+        if logo:
+            logo_jobs.append((item["id"], logo))
         items.append(item)
     return items
 
 
-def scan_series(row, tmdb, overrides, probes, jobs):
+def scan_series(row, tmdb, overrides, probes, jobs, logo_jobs):
     category = row["name"]
     shows = {}
     for entry in row_entries(row):
@@ -516,6 +570,9 @@ def scan_series(row, tmdb, overrides, probes, jobs):
         jobs.append((series_id, POSTER_SIZE, (details or {}).get("poster_path"), first_video, 0.3))
         backdrop = tmdb.backdrop("tv", details["id"], details) if details else None
         jobs.append((series_id + "#card", CARD_SIZE, backdrop, first_video, 0.3))
+        logo = tmdb.logo("tv", details["id"]) if details else None
+        if logo:
+            logo_jobs.append((series_id, logo))
         items.append(item)
     return items
 
@@ -529,14 +586,14 @@ def main():
     tmdb = Tmdb()
     overrides = load_overrides()
     probes = load_probe_cache()
-    jobs = []
+    jobs, logo_jobs = [], []
 
     rows = load_rows()
     log(f"Scanning {', '.join(r['name'] for r in rows)} ({'online' if tmdb.online else 'offline: no TMDB token'})")
     items = []
     for row in rows:
         scan = scan_movies if row["type"] == "movies" else scan_series
-        items += scan(row, tmdb, overrides, probes, jobs)
+        items += scan(row, tmdb, overrides, probes, jobs, logo_jobs)
     PROBE_CACHE.write_text(json.dumps(probes))
     save_guess_cache()
 
@@ -547,12 +604,15 @@ def main():
             thumbs[key] = path
             images[key] = image
             sources[source] = sources.get(source, 0) + 1
+        logos = {key: (path, size, image) for key, path, size, image in pool.map(make_logo, logo_jobs) if path}
     # thumb, card: mpv's BGRA; poster, backdrop, still: the JPEGs behind them
     for item in items:
         item["thumb"] = thumbs.get(item["id"])
         item["card"] = thumbs.get(item["id"] + "#card")
         item["poster"] = images.get(item["id"])
         item["backdrop"] = images.get(item["id"] + "#card")
+        # logo: mpv's BGRA (premultiplied, logo_size big); logo_image: its PNG
+        item["logo"], item["logo_size"], item["logo_image"] = logos.get(item["id"], (None, None, None))
         for ep in item.get("episodes", []):
             ep["thumb"] = thumbs.get(ep["id"])
             ep["still"] = images.get(ep["id"])
@@ -578,7 +638,7 @@ def main():
     episodes = sum(len(i.get("episodes", [])) for i in items)
     tmdb_rows = {row["name"] for row in rows if row["tmdb"]}
     unmatched = [i["title"] for i in items if i["category"] in tmdb_rows and not i.get("tmdb_id")]
-    log(f"Done: {len(items)} titles, {episodes} episodes; thumbnails {sources}; library {'unchanged' if unchanged else 'updated'}")
+    log(f"Done: {len(items)} titles, {episodes} episodes; thumbnails {sources}; logos {len(logos)}; library {'unchanged' if unchanged else 'updated'}")
     if unmatched:
         log("Not found on TMDB: " + ", ".join(unmatched))
 
