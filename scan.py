@@ -15,7 +15,9 @@ Writes ~/.cache/reel/library.json plus BGRA thumbnails ready for
 mpv's overlay-add, and the JPEGs they came from (poster, backdrop, still), plus
 each title's transparent logo. Posters, details and episode stills come from TMDB when
 online (token in ~/.config/reel/tmdb_token or $TMDB_TOKEN); anything
-missing falls back to a frame grabbed from the video.
+missing falls back to a frame grabbed from the video. Ratings: IMDb, Rotten
+Tomatoes and Metacritic from OMDb (key in ~/.config/reel/omdb_key or
+$OMDB_KEY), MyAnimeList's from Jikan for anime, TMDB's own.
 """
 
 import concurrent.futures
@@ -64,6 +66,14 @@ LOGO_BOX = (500, 200)
 TMDB_API = "https://api.themoviedb.org/3"
 TMDB_IMAGE = "https://image.tmdb.org/t/p"
 TMDB_TTL = 30 * 24 * 3600
+# A show still on the air: its details (status, next episode) kept a day
+AIRING_TTL = 24 * 3600
+OMDB_API = "https://www.omdbapi.com/"
+OMDB_CACHE = CACHE / "omdb"
+JIKAN_API = "https://api.jikan.moe/v4"
+JIKAN_CACHE = CACHE / "jikan"
+# Ratings move slowly; a week is fresh enough
+RATINGS_TTL = 7 * 24 * 3600
 # Hosts some ISPs block via DNS; resolved through DNS-over-HTTPS instead.
 DOH_HOSTS = {"api.themoviedb.org"}
 
@@ -175,10 +185,10 @@ class Tmdb:
         self.online = bool(token)
         TMDB_CACHE.mkdir(parents=True, exist_ok=True)
 
-    def get(self, path, **params):
+    def get(self, path, ttl=TMDB_TTL, **params):
         url = f"{TMDB_API}{path}?" + urllib.parse.urlencode(sorted(params.items()))
         cache_file = TMDB_CACHE / (hashlib.sha1(url.encode()).hexdigest() + ".json")
-        if cache_file.exists() and time.time() - cache_file.stat().st_mtime < TMDB_TTL:
+        if cache_file.exists() and time.time() - cache_file.stat().st_mtime < ttl:
             return json.loads(cache_file.read_text())
         if not self.online:
             return json.loads(cache_file.read_text()) if cache_file.exists() else None
@@ -237,6 +247,179 @@ class Tmdb:
         name_key = "title" if kind == "movie" else "name"
         exact = [r for r in results if wanted in (normalize(r.get(name_key)), normalize(r.get("original_" + name_key)))]
         return (exact or results)[0]
+
+
+# --- ratings ----------------------------------------------------------------
+
+
+def cached_json(cache_dir, url, ttl, fetch):
+    """url's JSON from cache_dir if younger than ttl, else fetch() (None: keep
+    whatever is cached, however old)."""
+    cache_file = cache_dir / (hashlib.sha1(url.encode()).hexdigest() + ".json")
+    if cache_file.exists() and time.time() - cache_file.stat().st_mtime < ttl:
+        return json.loads(cache_file.read_text())
+    data = fetch()
+    if data is None:
+        return json.loads(cache_file.read_text()) if cache_file.exists() else None
+    cache_file.write_text(json.dumps(data))
+    return data
+
+
+def number(text):
+    """The number in OMDb's text: 8.6, 1,234,567, 96%, 87/100; N/A -> None."""
+    m = re.match(r"[\d,.]+", (text or "").strip())
+    if not m:
+        return None
+    value = float(m.group().replace(",", ""))
+    return int(value) if value.is_integer() and "." not in m.group() else value
+
+
+class Omdb:
+    """IMDb's rating and votes, Rotten Tomatoes and Metacritic, by IMDb id."""
+
+    def __init__(self):
+        key = os.environ.get("OMDB_KEY")
+        key_file = CONFIG / "omdb_key"
+        if not key and key_file.exists():
+            key = key_file.read_text().strip()
+        self.key = key
+        self.online = bool(key)
+        OMDB_CACHE.mkdir(parents=True, exist_ok=True)
+
+    def fetch(self, imdb_id):
+        url = f"{OMDB_API}?" + urllib.parse.urlencode({"i": imdb_id, "apikey": self.key})
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as exc:
+            # 401: a bad key, or the day's 1000 calls used up
+            log(f"OMDb refused ({exc.code}: {exc.read().decode(errors='replace')[:100]}); ratings from cache")
+            self.online = False
+            return None
+        except OSError as exc:
+            log(f"OMDb unreachable ({exc}); ratings from cache")
+            self.online = False
+            return None
+        if data.get("Response") == "False" and "not found" not in (data.get("Error") or "").lower():
+            log(f"OMDb: {data.get('Error')}; ratings from cache")
+            self.online = False
+            return None
+        return data
+
+    def ratings(self, imdb_id):
+        if not imdb_id:
+            return {}
+        url = f"{OMDB_API}?i={imdb_id}"  # the cache key, without the key
+        data = cached_json(OMDB_CACHE, url, RATINGS_TTL, lambda: self.fetch(imdb_id) if self.online else None) or {}
+        result = {"imdb": number(data.get("imdbRating")), "imdb_votes": number(data.get("imdbVotes"))}
+        for r in data.get("Ratings") or []:
+            if r.get("Source") == "Rotten Tomatoes":
+                result["rt"] = number(r.get("Value"))
+            elif r.get("Source") == "Metacritic":
+                result["metacritic"] = number(r.get("Value"))
+        return {k: v for k, v in result.items() if v is not None}
+
+
+class Jikan:
+    """MyAnimeList's score, through Jikan (no key; 3 calls a second)."""
+
+    def __init__(self, online):
+        self.online = online
+        self.last = 0.0
+        JIKAN_CACHE.mkdir(parents=True, exist_ok=True)
+
+    def fetch(self, url):
+        if not self.online:
+            return None
+        for attempt in range(3):
+            time.sleep(max(0, self.last + 0.4 - time.time()))
+            self.last = time.time()
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "reel-scan"}), timeout=8) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                if exc.code == 404:
+                    return {}
+                log(f"Jikan refused ({exc.code}); MAL scores from cache")
+                break
+            except OSError as exc:
+                log(f"Jikan unreachable ({exc}); MAL scores from cache")
+                break
+        self.online = False
+        return None
+
+    def get(self, path, **params):
+        url = f"{JIKAN_API}{path}?" + urllib.parse.urlencode(sorted(params.items()))
+        return cached_json(JIKAN_CACHE, url, RATINGS_TTL, lambda: self.fetch(url))
+
+    def find(self, titles, year, kind):
+        """The MAL entry for a TMDB title: a name of it, its year, its kind
+        (a series' first season is MAL's TV entry that aired that year)."""
+        types = {"Movie"} if kind == "movie" else {"TV", "ONA", "OVA"}
+        wanted = {normalize(t) for t in titles if t}
+        best = None
+        for title in [t for t in titles if t][:2]:
+            data = self.get("/anime", q=title, limit=10)
+            for a in (data or {}).get("data") or []:
+                names = {normalize(a.get(k)) for k in ("title", "title_english", "title_japanese")}
+                names |= {normalize(t.get("title")) for t in a.get("titles") or []}
+                aired = ((a.get("aired") or {}).get("prop") or {}).get("from") or {}
+                score = (bool(names & wanted) * 4 + (aired.get("year") == year) * 2 + (a.get("type") in types) * 2
+                         + bool(year and aired.get("year") and abs(aired["year"] - year) <= 1))
+                if score >= 6 and (best is None or (score, a.get("members") or 0) > best[0]):
+                    best = ((score, a.get("members") or 0), a)
+            if best and best[0][0] >= 8:
+                break
+        return best[1] if best else None
+
+    def ratings(self, mal_id=None, titles=(), year=None, kind="tv"):
+        if mal_id:
+            a = ((self.get(f"/anime/{mal_id}") or {}).get("data")) or {}
+        else:
+            a = self.find(titles, year, kind) or {}
+        result = {"mal": a.get("score"), "mal_votes": a.get("scored_by"), "mal_id": a.get("mal_id")}
+        return {k: v for k, v in result.items() if v is not None}
+
+
+def is_anime(details):
+    return (details or {}).get("original_language") == "ja" and any(g.get("id") == 16 for g in (details or {}).get("genres") or [])
+
+
+def ratings(details, imdb_id, omdb, jikan, override, kind):
+    """Every score known for a title: imdb (+ imdb_votes), rt (%), metacritic,
+    tmdb (+ tmdb_votes), mal (+ mal_votes, mal_id) for anime."""
+    result = {}
+    if details and details.get("vote_count"):
+        result["tmdb"] = round(details.get("vote_average") or 0, 1)
+        result["tmdb_votes"] = details["vote_count"]
+    result |= omdb.ratings(imdb_id)
+    if is_anime(details) or override.get("mal_id"):
+        name, original = ("title", "original_title") if kind == "movie" else ("name", "original_name")
+        date = (details or {}).get("release_date" if kind == "movie" else "first_air_date") or ""
+        result |= jikan.ratings(override.get("mal_id"), ((details or {}).get(name), (details or {}).get(original)), int(date[:4] or 0) or None, kind)
+    return result
+
+
+ENDED = {"Ended", "Canceled"}
+
+
+def air_status(details):
+    """A show's state: status (returning, ended, canceled, upcoming), the
+    next episode to air and the last that did. Whether it's airing right
+    now is the reader's call, by those dates."""
+    if not details:
+        return {}
+    status = {"Returning Series": "returning", "Ended": "ended", "Canceled": "canceled"}.get(details.get("status"), "upcoming")
+    nxt, last = details.get("next_episode_to_air") or {}, details.get("last_episode_to_air") or {}
+    result = {"status": status, "network": ((details.get("networks") or [{}])[0]).get("name")}
+    if nxt.get("air_date"):
+        result["next_air"] = {"date": nxt["air_date"], "season": nxt.get("season_number"), "episode": nxt.get("episode_number")}
+    if last.get("air_date"):
+        result["last_air"] = {"date": last["air_date"], "season": last.get("season_number"), "episode": last.get("episode_number")}
+    return {k: v for k, v in result.items() if v is not None}
 
 
 # --- local files ------------------------------------------------------------
@@ -446,7 +629,7 @@ def load_overrides():
         return {}
 
 
-def scan_movies(row, tmdb, overrides, probes, jobs, logo_jobs):
+def scan_movies(row, tmdb, omdb, jikan, overrides, probes, jobs, logo_jobs):
     items = []
     for entry in row_entries(row):
         files = video_files(entry)
@@ -473,8 +656,10 @@ def scan_movies(row, tmdb, overrides, probes, jobs, logo_jobs):
             "overview": (details or {}).get("overview") or "",
             "tagline": (details or {}).get("tagline") or "",
             "rating": round((details or {}).get("vote_average") or 0, 1) or None,
+            "ratings": ratings(details, (details or {}).get("imdb_id"), omdb, jikan, override, "movie"),
             "genres": [g["name"] for g in (details or {}).get("genres", [])],
             "tmdb_id": (details or {}).get("id"),
+            "imdb_id": (details or {}).get("imdb_id") or None,
             "path": str(video),
             "watch_later": watch_later_name(video),
             "duration": info.get("duration"),
@@ -494,7 +679,7 @@ def scan_movies(row, tmdb, overrides, probes, jobs, logo_jobs):
     return items
 
 
-def scan_series(row, tmdb, overrides, probes, jobs, logo_jobs):
+def scan_series(row, tmdb, omdb, jikan, overrides, probes, jobs, logo_jobs):
     category = row["name"]
     shows = {}
     for entry in row_entries(row):
@@ -504,7 +689,7 @@ def scan_series(row, tmdb, overrides, probes, jobs, logo_jobs):
         override = overrides.get(f"{category}/{entry.name}", {})
         parsed = guess(entry.name if entry.is_dir() else entry.stem)
         title = override.get("title") or parsed["title"] or entry.name
-        show = shows.setdefault(normalize(title), {"title": title, "year": override.get("year"), "tmdb_id": override.get("tmdb_id"), "files": [], "folders": []})
+        show = shows.setdefault(normalize(title), {"title": title, "year": override.get("year"), "tmdb_id": override.get("tmdb_id"), "mal_id": override.get("mal_id"), "files": [], "folders": []})
         show["folders"].append(entry.name)
         for f in files:
             g = guess(f.name)
@@ -520,6 +705,10 @@ def scan_series(row, tmdb, overrides, probes, jobs, logo_jobs):
         if row["tmdb"]:
             match = {"id": show["tmdb_id"]} if show["tmdb_id"] else tmdb.search("tv", show["title"], show["year"])
             details = tmdb.get(f"/tv/{match['id']}") if match else None
+            # Still on the air: its status and next episode a day old at most
+            if details and details.get("status") not in ENDED:
+                details = tmdb.get(f"/tv/{match['id']}", ttl=AIRING_TTL) or details
+        imdb_id = ((tmdb.get(f"/tv/{details['id']}/external_ids") or {}).get("imdb_id") or None) if details else None
 
         seasons = {}
         if details:
@@ -560,8 +749,11 @@ def scan_series(row, tmdb, overrides, probes, jobs, logo_jobs):
             "year": int(((details or {}).get("first_air_date") or "")[:4] or 0) or show["year"],
             "overview": (details or {}).get("overview") or "",
             "rating": round((details or {}).get("vote_average") or 0, 1) or None,
+            "ratings": ratings(details, imdb_id, omdb, jikan, {"mal_id": show["mal_id"]} if show["mal_id"] else {}, "tv"),
+            **air_status(details),
             "genres": [g["name"] for g in (details or {}).get("genres", [])],
             "tmdb_id": (details or {}).get("id"),
+            "imdb_id": imdb_id,
             "folders": show["folders"],
             "episodes": episodes,
             # When its latest episode came in
@@ -584,16 +776,18 @@ def main():
     lock = open(CACHE / "scan.lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     tmdb = Tmdb()
+    omdb = Omdb()
+    jikan = Jikan(tmdb.online)
     overrides = load_overrides()
     probes = load_probe_cache()
     jobs, logo_jobs = [], []
 
     rows = load_rows()
-    log(f"Scanning {', '.join(r['name'] for r in rows)} ({'online' if tmdb.online else 'offline: no TMDB token'})")
+    log(f"Scanning {', '.join(r['name'] for r in rows)} ({'online' if tmdb.online else 'offline: no TMDB token'}{'' if omdb.online else '; no OMDb key, so no IMDb, RT or Metacritic'})")
     items = []
     for row in rows:
         scan = scan_movies if row["type"] == "movies" else scan_series
-        items += scan(row, tmdb, overrides, probes, jobs, logo_jobs)
+        items += scan(row, tmdb, omdb, jikan, overrides, probes, jobs, logo_jobs)
     PROBE_CACHE.write_text(json.dumps(probes))
     save_guess_cache()
 

@@ -32,13 +32,18 @@ What other programs read (mpv's start screen, quickbar's video menu):
  "items": [ITEM, …]}
 
 ITEM     id, kind ("movie" | "series"), category (its row), title, year,
-         overview, tagline, rating, genres, tmdb_id, added (epoch),
+         overview, tagline, rating (TMDB's), ratings: {imdb, imdb_votes,
+         rt (%), metacritic, tmdb, tmdb_votes, mal, mal_votes, mal_id},
+         only the ones known, genres, tmdb_id, imdb_id, added (epoch),
          thumb, card (BGRA files for mpv), poster, backdrop (JPEGs),
          logo (premultiplied BGRA for mpv), logo_size ([w, h], fits
          500x200), logo_image (the transparent PNG);
          a movie: path, watch_later (mpv's resume file name), duration,
          width, height, audio, subs (languages);
-         a series: folders, episodes: [EPISODE, …]
+         a series: folders, episodes: [EPISODE, …], status ("returning" |
+         "ended" | "canceled" | "upcoming"), network, next_air, last_air
+         ({date, season, episode}; whether it's airing now is the
+         reader's call, by those dates)
 EPISODE  id, season, episode, title, overview, air_date, path,
          watch_later, duration, width, height, audio, subs, added,
          thumb, still
@@ -55,6 +60,10 @@ Fields may be missing or null when nothing is known (offline, say).
 - `overrides.json`: the title, year or TMDB id for files whose names mislead
   (keyed by row name and path, e.g. `"Movies/500_days_of_summer.mkv"`).
 - `tmdb_token`: a TMDB API read token (or `$TMDB_TOKEN`); kept out of git.
+- `omdb_key`: an OMDb API key (or `$OMDB_KEY`; free at omdbapi.com) for
+  IMDb, Rotten Tomatoes and Metacritic ratings; kept out of git. Anime get
+  MyAnimeList's score through Jikan, no key; `mal_id` in overrides.json
+  fixes a wrong match.
   Without it everything works offline, from file names and video frames, but
   `sort.py` leaves torrents where they are.
 
