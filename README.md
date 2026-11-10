@@ -63,9 +63,10 @@ Fields may be missing or null when nothing is known (offline, say).
   (keyed by row name and path, e.g. `"Movies/500_days_of_summer.mkv"`).
 - `tmdb_token`: a TMDB API read token (or `$TMDB_TOKEN`); kept out of git.
 - `omdb_key`: an OMDb API key (or `$OMDB_KEY`; free at omdbapi.com) for
-  IMDb, Rotten Tomatoes and Metacritic ratings; kept out of git. Anime get
-  MyAnimeList's score through Jikan, no key; `mal_id` in overrides.json
-  fixes a wrong match.
+  IMDb, Rotten Tomatoes and Metacritic ratings; kept out of git.
+- `mal_client_id`: a MyAnimeList API client ID (or `$MAL_CLIENT_ID`; free
+  from MAL's account settings, API) for anime's MAL scores; kept out of git.
+  `mal_id` in overrides.json fixes a wrong match.
   Without it everything works offline, from file names and video frames, but
   `sort.py` leaves torrents where they are.
 
