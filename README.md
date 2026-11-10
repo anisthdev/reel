@@ -43,7 +43,9 @@ ITEM     id, kind ("movie" | "series"), category (its row), title, year,
          a series: folders, episodes: [EPISODE, …], status ("returning" |
          "ended" | "canceled" | "upcoming"), network, next_air, last_air
          ({date, season, episode}; whether it's airing now is the
-         reader's call, by those dates)
+         reader's call, by those dates), tmdb_seasons ([{season,
+         episodes, air_date}], every season TMDB knows but specials,
+         announced ones too: the aired ones end at last_air)
 EPISODE  id, season, episode, title, overview, air_date, path,
          watch_later, duration, width, height, audio, subs, added,
          thumb, still

@@ -754,6 +754,10 @@ def scan_series(row, tmdb, omdb, jikan, overrides, probes, jobs, logo_jobs):
             "genres": [g["name"] for g in (details or {}).get("genres", [])],
             "tmdb_id": (details or {}).get("id"),
             "imdb_id": imdb_id,
+            # Every season TMDB knows (specials left out), aired or announced,
+            # to set against the episodes on disk
+            "tmdb_seasons": [{"season": s["season_number"], "episodes": s.get("episode_count") or 0, "air_date": s.get("air_date")}
+                             for s in (details or {}).get("seasons") or [] if s.get("season_number")] or None,
             "folders": show["folders"],
             "episodes": episodes,
             # When its latest episode came in
